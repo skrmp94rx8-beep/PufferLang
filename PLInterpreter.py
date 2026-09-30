@@ -74,6 +74,12 @@ class PufferLang:
             elif code.startswith('+R', i):
                 tokens.append(('RECUR', '+R'))
                 i += 2
+            elif code.startswith('+N', i):
+                tokens.append(('NODE', '+N'))
+                i += 2
+            elif code.startswith('+I', i):
+                tokens.append(('INIT', '+I'))
+                i += 2
             elif code.startswith('+>', i):
                 tokens.append(('THEN', '+>'))
                 i += 2
@@ -116,6 +122,13 @@ class PufferLang:
                 i += 1
             elif c == '>':
                 tokens.append(('GT', '>'))
+                i += 1
+
+            elif c == "{":
+                tokens.append(("LLB","{"))
+                i += 1
+            elif c == "}":
+                tokens.append(("RLB","}"))
                 i += 1
             elif c == '?':
                 tokens.append(('Q', '?'))
@@ -180,6 +193,51 @@ class PufferLang:
                 raise self.PLSyntaxError(f"\\n needed:{self._peek()}")
         self.ast = stmts
         return stmts
+
+    def _parse_node(self):
+        self._next() 
+        name = self._expect('ID')[1]
+        bases = []
+        if self._peek()[0] == 'LLB':
+            self._next()
+            bases.append(self._expect('ID')[1])
+            while self._peek()[0] == 'COMMA':
+                self._next()
+                bases.append(self._expect('ID')[1])
+            self._expect('RLB')
+        
+        self._expect('LB') 
+        init_body = None
+        methods = []
+        self._skip_newlines()
+        while self._peek()[0] != 'RB':  
+            t = self._peek()
+            if t == ('INIT', '+I'):
+                self._next()
+                self._expect('LB')  
+                init_body = []
+                self._depth += 1
+                self._skip_newlines()
+                while self._peek()[0] != 'RB':
+                    init_body.append(self._parse_stmt())
+                    if self._peek()[0] == 'NL':
+                        self._skip_newlines()
+                self._expect('RB')
+                self._depth -= 1
+            elif t == ('FUNC', '+&'):
+                methods.append(self._parse_funcdef())
+            else:
+                raise self.PLSyntaxError(f"compiler want +I or +& in node bro, got {t}")
+            self._skip_newlines()
+        self._expect('RB')  
+        
+        return {
+            'type': 'nodedef',
+            'name': name,
+            'bases': bases,
+            'init': init_body,
+            'methods': methods,
+        }
 
     def _peek(self, off=0):
         return self.tokens[self.pos + off]
@@ -257,6 +315,8 @@ class PufferLang:
             if self.mode == 'pdl' and self._depth == 0:
                 raise self.PLDLLError("pdl files can only +& and asg at top level bruh")
             return self._parse_syscall()
+        if t == ('NODE', '+N'):
+            return self._parse_node()
         if t == ('IMP', '+M'):
             if self.mode == 'pdl' and self._depth == 0:
                 raise self.PLDLLError("no chain import plz")
@@ -439,6 +499,26 @@ class PufferLang:
 
         raise self.PLNameError(f"no method called {method} in sys")
 
+    def _gen_node(self, stmt):
+        name = stmt['name']
+        bases = stmt['bases']
+        base_str = f"({', '.join(bases)})" if bases else ""
+        lines = [f"class {name}{base_str}:"]
+        if stmt['init']:
+            lines.append("\tdef __init__(self):")
+            for s in stmt['init']:
+                for sub in self._gen_stmt(s).split('\n'):
+                    lines.append(f"\t\t{sub}")
+        else:
+            lines.append("\tdef __init__(self):")
+            lines.append("\t\tpass")
+        for m in stmt['methods']:
+            method_code = self._gen_funcdef(m)
+            for line in method_code.split('\n'):
+                lines.append(f"\t{line}")
+        
+        return "\n".join(lines)
+
     def codegen(self):
         lines = []
         for stmt in self.ast:
@@ -552,6 +632,8 @@ class PufferLang:
             return self._gen_condition(stmt)
         if stmt['type'] == 'recurring':
             return self._gen_recurring(stmt)
+        if stmt['type'] == 'nodedef':
+            return self._gen_node(stmt)
         raise self.PLNameError(f"what the hell is {stmt}")
 
     def _expr(self, node):
